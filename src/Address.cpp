@@ -11,36 +11,62 @@
 
 namespace qdlt645 {
 const Address Address::BroadcastAddress = Address(QByteArrayLiteral("\x99\x99\x99\x99\x99\x99"));
+const Address Address::InvalidAddress = Address(QByteArrayLiteral("\x00\x00\x00\x00\x00\x00"));
 #define DEFAULT_ADDRESS \
     mAddrBytes { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
 
-Address Address::fromAddrString(const QString &addrStr) {
+Address Address::fromString(const QString &addrStr) {
     QByteArray addrBytes = QByteArray::fromHex(addrStr.toLatin1());
     return Address(addrBytes);
 }
 
-bool Address::isAddrString(const QString &addrStr) {
-    if (addrStr.size() > QDLT645_ADDRESS_LEN * 2) {
+bool Address::isAddrBytes(const QByteArray &addrBytes) {
+    if (addrBytes.size() > QDLT645_ADDRESS_LEN * 2) {
         return false;
     }
-    return std::any_of(addrStr.begin(), addrStr.end(), [](QChar c) {
-        return c.isDigit();
+    return std::all_of(addrBytes.begin(), addrBytes.end(), [](char c) {
+        quint8 h = static_cast<quint8>(c) >> 4;
+        quint8 l = static_cast<quint8>(c) & 0x0F;
+        return (h < 10 && l < 10) || (c == char(0xAA));
     });
 }
 
-bool Address::isWildcardAddrString(const QString &addrStr) {
-    if (addrStr.size() > QDLT645_ADDRESS_LEN * 2 || addrStr.size() % 2 != 0) {
+bool Address::isWildcardAddrBytes(const QByteArray &addrBytes) {
+    if (addrBytes.size() != QDLT645_ADDRESS_LEN) {
         return false;
     }
-    //地址域支持缩位寻址，即从若干低位起，剩余高位补 AAH 作为通配符进行读表操作，从站应答帧的地址域返回实际通信地址。
-    bool findWildcard = false;
-    for (int i = 0; i < addrStr.size(); i += 2) {
-        if (addrStr.mid(i, 2) == "AA") {
-            findWildcard = true;
-            continue;
+    if (!addrBytes.startsWith(char(QDLT645_WILDCARD_ADDR))) {
+        return false;
+    }
+    bool findNotAA = false;
+    for (auto b: addrBytes) {
+        if (findNotAA) {
+            if (b == char(QDLT645_WILDCARD_ADDR)) {
+                return false;
+            }
+        } else {
+            if (b != char(QDLT645_WILDCARD_ADDR)) {
+                findNotAA = true;
+            }
         }
     }
     return true;
+}
+
+bool Address::isAddrString(const QString &addrStr) {
+    QByteArray addrBytes = QByteArray::fromHex(addrStr.toLatin1());
+    if (addrBytes.size() != addrStr.size() / 2) {
+        return false;
+    }
+    return isAddrBytes(addrBytes);
+}
+
+bool Address::isWildcardAddrString(const QString &addrStr) {
+    QByteArray addrBytes = QByteArray::fromHex(addrStr.toLatin1());
+    if (addrBytes.size() != addrStr.size() / 2) {
+        return false;
+    }
+    return isWildcardAddrBytes(addrBytes);
 }
 
 Address::Address() :
@@ -68,12 +94,22 @@ QByteArray Address::getAddrBytes() const {
 }
 
 Stream &operator<<(Stream &s, const Address &a) {
-    s << Stream::CArray(reinterpret_cast<const char *>(a.mAddrBytes), QDLT645_ADDRESS_LEN);
+    // 地址域传输时低字节在前，高字节在后。
+    //mAddrBytes 存储时高字节在前，低字节在后。
+    char addrBytes[QDLT645_ADDRESS_LEN];
+    for (int i = 0; i < QDLT645_ADDRESS_LEN; ++i) {
+        addrBytes[i] = (char) a.mAddrBytes[QDLT645_ADDRESS_LEN - 1 - i];
+    }
+    s << Stream::CArray(addrBytes, QDLT645_ADDRESS_LEN);
     return s;
 }
 
 Stream &operator>>(Stream &s, Address &a) {
-    s >> Stream::CArray(reinterpret_cast<char *>(a.mAddrBytes), QDLT645_ADDRESS_LEN);
+    char addrBytes[QDLT645_ADDRESS_LEN];
+    s >> Stream::CArray(addrBytes, QDLT645_ADDRESS_LEN);
+    for (int i = 0; i < QDLT645_ADDRESS_LEN; ++i) {
+        a.mAddrBytes[i] = (quint8) addrBytes[QDLT645_ADDRESS_LEN - 1 - i];
+    }
     return s;
 }
 
@@ -91,8 +127,43 @@ void Address::setAddrByte(int index, quint8 value) {
     mAddrBytes[index] = value;
 }
 
-bool Address::isWildcardAddr() const {
+bool Address::isWildcard() const {
+    return isWildcardAddrBytes(QByteArray{reinterpret_cast<const char *>(mAddrBytes), QDLT645_ADDRESS_LEN});
 }
 
+bool Address::isBroadcast() const {
+    return *this == BroadcastAddress;
+}
+
+bool Address::operator==(const Address &other) const {
+    return memcmp(mAddrBytes, other.mAddrBytes, QDLT645_ADDRESS_LEN) == 0;
+}
+
+bool Address::operator!=(const Address &other) const {
+    return !(*this == other);
+}
+
+bool Address::isMatch(const Address &other) const {
+    if (!other.isWildcard()) {
+        return *this == other;
+    }
+    for (int idx = 0; idx < QDLT645_ADDRESS_LEN; ++idx) {
+        if (other.getAddrByte(idx) != QDLT645_WILDCARD_ADDR
+            && getAddrByte(idx) != other.getAddrByte(idx)) {
+            return false;
+        }
+    }
+}
+
+Address Address::createWildcard(const QByteArray &lowAddr) {
+    QByteArray wcAddr = lowAddr;
+    if (wcAddr.size() < QDLT645_ADDRESS_LEN) {
+        wcAddr = wcAddr.rightJustified(QDLT645_ADDRESS_LEN, char(0xAA));
+        return Address(wcAddr);
+    } else if (wcAddr.size() > QDLT645_ADDRESS_LEN) {
+        return Address(wcAddr.left(QDLT645_ADDRESS_LEN));
+    }
+    return Address(wcAddr);
+}
 
 }// namespace qdlt645

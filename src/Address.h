@@ -20,9 +20,16 @@ class QDLT645_EXPORT Address {
 
 public:
     static const Address BroadcastAddress;
+    static const Address InvalidAddress;
     static bool isAddrString(const QString &addrStr);
+    static bool isAddrBytes(const QByteArray &addrBytes);
     static bool isWildcardAddrString(const QString &addrStr);
-    static Address fromAddrString(const QString &addrStr);
+    static bool isWildcardAddrBytes(const QByteArray &addr);
+    static Address fromString(const QString &addrStr);
+    static Address createWildcard(const QByteArray &lowAddr);
+    bool operator==(const Address &other) const;
+    bool operator!=(const Address &other) const;
+
 public:
     Address();
     explicit Address(const QByteArray &addr);
@@ -31,8 +38,10 @@ public:
 
     QByteArray getAddrBytes() const;
     quint8 getAddrByte(int index) const;
+    bool isWildcard() const;
+    bool isBroadcast() const;
+    bool isMatch(const Address &other) const;
 
-    bool isWildcardAddr()const;
 private:
     quint8 mAddrBytes[QDLT645_ADDRESS_LEN];
 };
